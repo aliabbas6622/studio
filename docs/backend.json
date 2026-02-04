@@ -18,12 +18,14 @@
     },
     "FileTransfer": {
       "title": "File Transfer",
-      "description": "A record of a file being sent between devices.",
+      "description": "A record of a file or text being sent between devices.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["file", "text"] },
         "fileName": { "type": "string" },
         "fileSize": { "type": "number" },
+        "textContent": { "type": "string" },
         "progress": { "type": "number" },
         "status": { "type": "string", "enum": ["pending", "active", "completed", "failed", "cancelled"] },
         "senderId": { "type": "string" },
@@ -32,7 +34,7 @@
         "receiverName": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "fileName", "fileSize", "senderId", "receiverId", "status"]
+      "required": ["id", "type", "fileName", "senderId", "receiverId", "status"]
     }
   },
   "auth": {
@@ -45,7 +47,7 @@
     },
     "/transfers/{transferId}": {
       "schema": { "$ref": "#/backend/entities/FileTransfer" },
-      "description": "Record of file transfers between peers."
+      "description": "Record of file and text transfers between peers."
     }
   }
 }

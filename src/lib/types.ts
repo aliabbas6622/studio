@@ -12,11 +12,14 @@ export interface Peer {
 }
 
 export type TransferStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled';
+export type TransferType = 'file' | 'text';
 
 export interface FileTransfer {
   id: string;
+  type: TransferType;
   fileName: string;
   fileSize: number;
+  textContent?: string;
   progress: number;
   status: TransferStatus;
   senderId: string;

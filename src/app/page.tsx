@@ -8,6 +8,15 @@ import { TransferItem } from '@/components/transfer-item';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { 
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogTrigger
+} from "@/components/ui/dialog";
 import { 
   Wifi, 
   Plus, 
@@ -21,7 +30,8 @@ import {
   Check,
   Menu,
   X,
-  Cloud
+  Cloud,
+  MessageSquarePlus
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { 
@@ -54,6 +64,10 @@ export default function Home() {
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState<string>('');
   const [isEditingName, setIsEditingName] = useState(false);
+  
+  // Text share state
+  const [shareText, setShareText] = useState('');
+  const [isTextDialogOpen, setIsTextDialogOpen] = useState(false);
   
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -121,7 +135,9 @@ export default function Home() {
 
     return () => {
       clearInterval(interval);
-      setDoc(peerRef, { status: 'offline' }, { merge: true });
+      if (db && deviceId) {
+        setDoc(doc(db, 'peers', deviceId), { status: 'offline' }, { merge: true });
+      }
     };
   }, [db, deviceId, networkId, publicIp, deviceName]);
 
@@ -158,23 +174,31 @@ export default function Home() {
         ...t,
         direction: t.senderId === deviceId ? 'send' : 'receive',
         peerName: t.senderId === deviceId ? t.receiverName : t.senderName,
-        speed: t.status === 'active' ? 12 * 1024 * 1024 : 0,
-        eta: t.status === 'active' ? (100 - t.progress) * 0.2 : 0
+        speed: t.status === 'active' && t.type === 'file' ? 12 * 1024 * 1024 : 0,
+        eta: t.status === 'active' && t.type === 'file' ? (100 - t.progress) * 0.2 : 0
       })) as FileTransfer[];
   }, [rawTransfers, deviceId]);
 
-  // Simulated Transfer Progress
+  // Simulated Transfer Progress for Files
   useEffect(() => {
     if (!db) return;
     const interval = setInterval(() => {
       activeTransfers.forEach(t => {
         if (t.status === 'active' && t.senderId === deviceId) {
-          const nextProgress = Math.min(t.progress + 5, 100);
-          const nextStatus = nextProgress >= 100 ? 'completed' : 'active';
-          updateDoc(doc(db, 'transfers', t.id), {
-            progress: nextProgress,
-            status: nextStatus
-          });
+          if (t.type === 'file') {
+            const nextProgress = Math.min(t.progress + 5, 100);
+            const nextStatus = nextProgress >= 100 ? 'completed' : 'active';
+            updateDoc(doc(db, 'transfers', t.id), {
+              progress: nextProgress,
+              status: nextStatus
+            });
+          } else {
+            // Text is instant
+             updateDoc(doc(db, 'transfers', t.id), {
+              progress: 100,
+              status: 'completed'
+            });
+          }
         }
       });
     }, 1000);
@@ -193,6 +217,18 @@ export default function Home() {
     fileInputRef.current?.click();
   };
 
+  const handleOpenTextDialog = () => {
+    if (!selectedPeer) {
+      toast({
+        title: "Select a device",
+        description: "Choose a device from the list first.",
+        variant: "destructive"
+      });
+      return;
+    }
+    setIsTextDialogOpen(true);
+  };
+
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !selectedPeer || !db || !deviceId) return;
@@ -203,6 +239,7 @@ export default function Home() {
       
       setDoc(transferRef, {
         id: transferId,
+        type: 'file',
         fileName: file.name,
         fileSize: file.size,
         progress: 0,
@@ -226,6 +263,42 @@ export default function Home() {
     });
     
     e.target.value = '';
+    setSelectedPeer(null);
+  };
+
+  const onSendText = () => {
+    if (!shareText.trim() || !selectedPeer || !db || !deviceId) return;
+
+    const transferId = Math.random().toString(36).substr(2, 9);
+    const transferRef = doc(db, 'transfers', transferId);
+    
+    setDoc(transferRef, {
+      id: transferId,
+      type: 'text',
+      fileName: 'Text Snippet',
+      fileSize: shareText.length,
+      textContent: shareText,
+      progress: 0,
+      status: 'active',
+      senderId: deviceId,
+      senderName: deviceName,
+      receiverId: selectedPeer.id,
+      receiverName: selectedPeer.name,
+      createdAt: serverTimestamp()
+    }).catch(async () => {
+      errorEmitter.emit('permission-error', new FirestorePermissionError({
+        path: transferRef.path,
+        operation: 'create'
+      }));
+    });
+
+    toast({
+      title: "Text Sent",
+      description: `Message sent to ${selectedPeer.name}`,
+    });
+    
+    setShareText('');
+    setIsTextDialogOpen(false);
     setSelectedPeer(null);
   };
 
@@ -354,10 +427,10 @@ export default function Home() {
               <div className="space-y-12 pb-12">
                 <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
                   <div className="space-y-2">
-                    <h1 className="text-4xl font-black tracking-tight font-headline">Fast Local Transfer</h1>
-                    <p className="text-muted-foreground text-lg">Discovery enabled. Connect and share instantly.</p>
+                    <h1 className="text-4xl font-black tracking-tight font-headline">Quick Share</h1>
+                    <p className="text-muted-foreground text-lg">Send files or text snippets to any device nearby.</p>
                   </div>
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-3">
                     <input 
                       type="file" 
                       ref={fileInputRef} 
@@ -367,7 +440,16 @@ export default function Home() {
                     />
                     <Button 
                       size="lg" 
-                      className="rounded-2xl px-10 shadow-xl shadow-primary/25 gap-3 h-16 text-lg font-bold"
+                      variant="outline"
+                      className="rounded-2xl px-6 shadow-sm gap-3 h-16 text-lg font-bold border-2"
+                      onClick={handleOpenTextDialog}
+                    >
+                      <MessageSquarePlus className="h-6 w-6" />
+                      Send Text
+                    </Button>
+                    <Button 
+                      size="lg" 
+                      className="rounded-2xl px-8 shadow-xl shadow-primary/25 gap-3 h-16 text-lg font-bold"
                       onClick={handleSelectFiles}
                     >
                       <Plus className="h-6 w-6" />
@@ -396,7 +478,7 @@ export default function Home() {
                           peer={peer} 
                           onSelect={(p) => {
                             setSelectedPeer(p);
-                            toast({ title: `Target: ${p.name}`, description: "Now click 'Send Files' to share." });
+                            toast({ title: `Target: ${p.name}`, description: "Now click 'Send Files' or 'Send Text'." });
                           }} 
                         />
                       ))}
@@ -443,7 +525,7 @@ export default function Home() {
             {activeView === 'files' && (
               <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
                 <h2 className="text-3xl font-black">Transfer Activity</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                   {activeTransfers.length > 0 ? (
                     activeTransfers.map(transfer => (
                       <TransferItem key={transfer.id} transfer={transfer} />
@@ -528,6 +610,32 @@ export default function Home() {
           </div>
         </ScrollArea>
       </main>
+
+      {/* Send Text Dialog */}
+      <Dialog open={isTextDialogOpen} onOpenChange={setIsTextDialogOpen}>
+        <DialogContent className="sm:max-w-md rounded-3xl">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-black">Send Text Snippet</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <p className="text-sm text-muted-foreground">
+              To: <span className="font-bold text-foreground">{selectedPeer?.name}</span>
+            </p>
+            <Textarea 
+              placeholder="Paste your text or type a message here..." 
+              className="min-h-[150px] rounded-2xl p-4 text-base"
+              value={shareText}
+              onChange={(e) => setShareText(e.target.value)}
+            />
+          </div>
+          <DialogFooter className="flex gap-3 sm:justify-end">
+            <Button variant="ghost" className="rounded-xl px-6" onClick={() => setIsTextDialogOpen(false)}>Cancel</Button>
+            <Button className="rounded-xl px-8 font-bold" onClick={onSendText} disabled={!shareText.trim()}>
+              Send Snippet
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
