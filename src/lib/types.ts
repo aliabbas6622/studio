@@ -1,3 +1,4 @@
+
 export type PeerStatus = 'online' | 'offline';
 
 export interface Peer {
@@ -15,12 +16,17 @@ export type TransferStatus = 'pending' | 'active' | 'completed' | 'failed' | 'ca
 export interface FileTransfer {
   id: string;
   fileName: string;
-  fileSize: number; // in bytes
-  progress: number; // 0-100
-  speed: number; // in bytes per second
-  eta: number; // in seconds
+  fileSize: number;
+  progress: number;
   status: TransferStatus;
-  direction: 'send' | 'receive';
-  peerName: string;
-  startTime: any; // Date or Timestamp
+  senderId: string;
+  senderName: string;
+  receiverId: string;
+  receiverName: string;
+  createdAt: any;
+  // Local UI specific fields
+  speed?: number;
+  eta?: number;
+  direction?: 'send' | 'receive';
+  peerName?: string;
 }

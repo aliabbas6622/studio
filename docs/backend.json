@@ -15,6 +15,24 @@
         "status": { "type": "string", "enum": ["online", "offline"] }
       },
       "required": ["id", "name", "networkId", "status"]
+    },
+    "FileTransfer": {
+      "title": "File Transfer",
+      "description": "A record of a file being sent between devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileSize": { "type": "number" },
+        "progress": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "active", "completed", "failed", "cancelled"] },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fileName", "fileSize", "senderId", "receiverId", "status"]
     }
   },
   "auth": {
@@ -24,6 +42,10 @@
     "/peers/{peerId}": {
       "schema": { "$ref": "#/backend/entities/Peer" },
       "description": "Collection of active devices discovered on the network."
+    },
+    "/transfers/{transferId}": {
+      "schema": { "$ref": "#/backend/entities/FileTransfer" },
+      "description": "Record of file transfers between peers."
     }
   }
 }

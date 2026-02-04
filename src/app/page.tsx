@@ -7,6 +7,7 @@ import { PeerCard } from '@/components/peer-card';
 import { TransferItem } from '@/components/transfer-item';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Input } from '@/components/ui/input';
 import { 
   Wifi, 
   Plus, 
@@ -16,7 +17,9 @@ import {
   History, 
   Files,
   Search,
-  MonitorSmartphone
+  MonitorSmartphone,
+  User,
+  Check
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { 
@@ -29,15 +32,22 @@ import {
   serverTimestamp, 
   collection, 
   query, 
-  where
+  where,
+  deleteDoc,
+  updateDoc,
+  orderBy,
+  limit
 } from 'firebase/firestore';
+import { errorEmitter } from '@/firebase/error-emitter';
+import { FirestorePermissionError } from '@/firebase/errors';
 
 export default function Home() {
-  const [transfers, setTransfers] = useState<FileTransfer[]>([]);
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [networkId, setNetworkId] = useState<string>('detecting...');
   const [publicIp, setPublicIp] = useState<string>('0.0.0.0');
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [deviceName, setDeviceName] = useState<string>('');
+  const [isEditingName, setIsEditingName] = useState(false);
   
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -45,7 +55,6 @@ export default function Home() {
 
   // 1. Initialize Device ID & Network Detection
   useEffect(() => {
-    // Persistent Device ID
     let id = localStorage.getItem('rapidshare_device_id');
     if (!id) {
       id = 'dev-' + Math.random().toString(36).substring(2, 15);
@@ -53,7 +62,14 @@ export default function Home() {
     }
     setDeviceId(id);
 
-    // Detect "Network" (Simplified using public IP grouping)
+    const savedName = localStorage.getItem('rapidshare_device_name');
+    const deviceType = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'ios' :
+                     /Android/i.test(navigator.userAgent) ? 'android' :
+                     /Mac/i.test(navigator.userAgent) ? 'mac' :
+                     /Win/i.test(navigator.userAgent) ? 'windows' : 'linux';
+    
+    setDeviceName(savedName || `${deviceType.toUpperCase()} User`);
+
     fetch('https://api.ipify.org?format=json')
       .then(res => res.json())
       .then(data => {
@@ -80,22 +96,31 @@ export default function Home() {
     const updatePresence = () => {
       setDoc(peerRef, {
         id: deviceId,
-        name: `${deviceType.toUpperCase()} User`,
+        name: deviceName,
         ip: publicIp,
         networkId: networkId,
         deviceType: deviceType,
         lastSeen: serverTimestamp(),
         status: 'online'
-      }, { merge: true });
+      }, { merge: true }).catch(async () => {
+        errorEmitter.emit('permission-error', new FirestorePermissionError({
+          path: peerRef.path,
+          operation: 'write'
+        }));
+      });
     };
 
     updatePresence();
     const interval = setInterval(updatePresence, 30000);
 
-    return () => clearInterval(interval);
-  }, [db, deviceId, networkId, publicIp]);
+    return () => {
+      clearInterval(interval);
+      // Try to set offline on exit
+      setDoc(peerRef, { status: 'offline' }, { merge: true });
+    };
+  }, [db, deviceId, networkId, publicIp, deviceName]);
 
-  // 3. Discover Peers on same network
+  // 3. Discover Peers
   const peersQuery = useMemo(() => {
     if (!db || networkId === 'detecting...') return null;
     return query(
@@ -108,24 +133,49 @@ export default function Home() {
   const { data: allPeers } = useCollection(peersQuery);
   const nearbyPeers = (allPeers || []).filter(p => p.id !== deviceId) as Peer[];
 
-  // Simulate progress updates for active transfers
+  // 4. Live Transfers (Real-time Simulation)
+  const transfersQuery = useMemo(() => {
+    if (!db || !deviceId) return null;
+    // Show transfers where I am sender OR receiver
+    return query(
+      collection(db, 'transfers'),
+      orderBy('createdAt', 'desc'),
+      limit(10)
+    );
+  }, [db, deviceId]);
+
+  const { data: rawTransfers } = useCollection(transfersQuery);
+  
+  const activeTransfers = useMemo(() => {
+    if (!rawTransfers || !deviceId) return [];
+    return rawTransfers
+      .filter(t => t.senderId === deviceId || t.receiverId === deviceId)
+      .map(t => ({
+        ...t,
+        direction: t.senderId === deviceId ? 'send' : 'receive',
+        peerName: t.senderId === deviceId ? t.receiverName : t.senderName,
+        speed: t.status === 'active' ? 12 * 1024 * 1024 : 0,
+        eta: t.status === 'active' ? (100 - t.progress) * 0.2 : 0
+      })) as FileTransfer[];
+  }, [rawTransfers, deviceId]);
+
+  // Handle transfer simulation updates
   useEffect(() => {
-    const timer = setInterval(() => {
-      setTransfers(prev => prev.map(t => {
-        if (t.status !== 'active') return t;
-        const nextProgress = Math.min(t.progress + (Math.random() * 5), 100);
-        const nextStatus = nextProgress >= 100 ? 'completed' : 'active';
-        return {
-          ...t,
-          progress: Math.floor(nextProgress),
-          status: nextStatus,
-          speed: nextStatus === 'completed' ? 0 : 15 * 1024 * 1024 + (Math.random() * 5 * 1024 * 1024),
-          eta: nextStatus === 'completed' ? 0 : Math.max(0, (100 - nextProgress) * 0.5)
-        };
-      }));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!db) return;
+    const interval = setInterval(() => {
+      activeTransfers.forEach(t => {
+        if (t.status === 'active' && t.senderId === deviceId) {
+          const nextProgress = Math.min(t.progress + 5, 100);
+          const nextStatus = nextProgress >= 100 ? 'completed' : 'active';
+          updateDoc(doc(db, 'transfers', t.id), {
+            progress: nextProgress,
+            status: nextStatus
+          });
+        }
+      });
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [db, activeTransfers, deviceId]);
 
   const handleSelectFiles = () => {
     if (!selectedPeer) {
@@ -141,22 +191,31 @@ export default function Home() {
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || !selectedPeer) return;
+    if (!files || !selectedPeer || !db || !deviceId) return;
 
-    const newTransfers: FileTransfer[] = Array.from(files).map(file => ({
-      id: Math.random().toString(36).substr(2, 9),
-      fileName: file.name,
-      fileSize: file.size,
-      progress: 0,
-      speed: 0,
-      eta: 0,
-      status: 'active',
-      direction: 'send',
-      peerName: selectedPeer.name,
-      startTime: new Date()
-    }));
+    Array.from(files).forEach(file => {
+      const transferId = Math.random().toString(36).substr(2, 9);
+      const transferRef = doc(db, 'transfers', transferId);
+      
+      setDoc(transferRef, {
+        id: transferId,
+        fileName: file.name,
+        fileSize: file.size,
+        progress: 0,
+        status: 'active',
+        senderId: deviceId,
+        senderName: deviceName,
+        receiverId: selectedPeer.id,
+        receiverName: selectedPeer.name,
+        createdAt: serverTimestamp()
+      }).catch(async () => {
+        errorEmitter.emit('permission-error', new FirestorePermissionError({
+          path: transferRef.path,
+          operation: 'create'
+        }));
+      });
+    });
 
-    setTransfers(prev => [...newTransfers, ...prev]);
     toast({
       title: "Transfer Started",
       description: `Sending ${files.length} file(s) to ${selectedPeer.name}`,
@@ -166,12 +225,10 @@ export default function Home() {
     setSelectedPeer(null);
   };
 
-  const handlePeerSelect = (peer: Peer) => {
-    setSelectedPeer(peer);
-    toast({
-      title: `Selected ${peer.name}`,
-      description: "Now click 'Send Files' to start transferring.",
-    });
+  const handleUpdateName = () => {
+    localStorage.setItem('rapidshare_device_name', deviceName);
+    setIsEditingName(false);
+    toast({ title: "Name Updated", description: `You are now known as ${deviceName}` });
   };
 
   return (
@@ -204,14 +261,37 @@ export default function Home() {
           </Button>
         </nav>
 
-        <div className="bg-muted/50 rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground mb-3">
-            <Wifi className="h-3 w-3 text-secondary animate-pulse" />
-            Network: {networkId}
-          </div>
+        <div className="bg-muted/50 rounded-2xl p-4 space-y-4">
           <div className="space-y-1">
-            <p className="text-sm font-medium">Grouped by Public IP</p>
-            <p className="text-[10px] text-muted-foreground font-mono">{publicIp}</p>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase text-muted-foreground">My Device</span>
+              <Button variant="ghost" size="icon" className="h-4 w-4" onClick={() => setIsEditingName(true)}>
+                <Settings className="h-3 w-3" />
+              </Button>
+            </div>
+            {isEditingName ? (
+              <div className="flex gap-2">
+                <Input 
+                  value={deviceName} 
+                  onChange={(e) => setDeviceName(e.target.value)} 
+                  className="h-7 text-xs px-2"
+                  autoFocus
+                />
+                <Button size="icon" className="h-7 w-7" onClick={handleUpdateName}>
+                  <Check className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <p className="text-sm font-bold truncate">{deviceName}</p>
+            )}
+          </div>
+
+          <div className="pt-2 border-t border-border/50">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground mb-1">
+              <Wifi className="h-3 w-3 text-secondary animate-pulse" />
+              Net: {networkId}
+            </div>
+            <p className="text-[10px] text-muted-foreground font-mono truncate">{publicIp}</p>
           </div>
         </div>
       </aside>
@@ -246,7 +326,7 @@ export default function Home() {
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight mb-2 font-headline">Fast Local Transfer</h1>
-                <p className="text-muted-foreground">Devices on your current network (IP: {publicIp}) will appear here.</p>
+                <p className="text-muted-foreground">Devices on your current network will appear here automatically.</p>
               </div>
               <div className="flex items-center gap-3">
                 <input 
@@ -276,7 +356,7 @@ export default function Home() {
                   </h2>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                    Scanning network...
+                    Scanning...
                   </div>
                 </div>
 
@@ -285,7 +365,10 @@ export default function Home() {
                     <PeerCard 
                       key={peer.id} 
                       peer={peer} 
-                      onSelect={handlePeerSelect} 
+                      onSelect={(p) => {
+                        setSelectedPeer(p);
+                        toast({ title: `Selected ${p.name}`, description: "Click 'Send Files' to transfer." });
+                      }} 
                     />
                   ))}
                   {nearbyPeers.length === 0 && (
@@ -307,8 +390,8 @@ export default function Home() {
                 </h2>
                 
                 <div className="space-y-4">
-                  {transfers.length > 0 ? (
-                    transfers.map(transfer => (
+                  {activeTransfers.length > 0 ? (
+                    activeTransfers.map(transfer => (
                       <TransferItem key={transfer.id} transfer={transfer} />
                     ))
                   ) : (
