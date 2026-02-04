@@ -4,8 +4,10 @@ export interface Peer {
   id: string;
   name: string;
   ip: string;
+  networkId: string;
   deviceType: 'android' | 'windows' | 'mac' | 'ios' | 'linux';
-  lastSeen: Date;
+  lastSeen: any; // Firestore Timestamp
+  status: PeerStatus;
 }
 
 export type TransferStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled';
@@ -20,5 +22,5 @@ export interface FileTransfer {
   status: TransferStatus;
   direction: 'send' | 'receive';
   peerName: string;
-  startTime: Date;
+  startTime: any; // Date or Timestamp
 }

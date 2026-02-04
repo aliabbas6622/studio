@@ -1,11 +1,10 @@
 "use client"
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Peer, FileTransfer } from '@/lib/types';
 import { PeerCard } from '@/components/peer-card';
 import { TransferItem } from '@/components/transfer-item';
 import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { 
   Wifi, 
@@ -19,38 +18,114 @@ import {
   MonitorSmartphone
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { Input } from '@/components/ui/input';
-
-const MOCK_PEERS: Peer[] = [
-  { id: '1', name: 'MacBook Pro 16', ip: '192.168.1.15', deviceType: 'mac', lastSeen: new Date() },
-  { id: '2', name: 'Surface Pro 9', ip: '192.168.1.22', deviceType: 'windows', lastSeen: new Date() },
-  { id: '3', name: 'Pixel 7 Pro', ip: '192.168.1.45', deviceType: 'android', lastSeen: new Date() },
-  { id: '4', name: 'Desktop Gaming', ip: '192.168.1.12', deviceType: 'windows', lastSeen: new Date() },
-];
+import { 
+  useFirestore, 
+  useAuth, 
+  useUser, 
+  useCollection 
+} from '@/firebase';
+import { 
+  doc, 
+  setDoc, 
+  serverTimestamp, 
+  collection, 
+  query, 
+  where,
+  onSnapshot
+} from 'firebase/firestore';
+import { signInAnonymously } from 'firebase/auth';
 
 export default function Home() {
-  const [peers, setPeers] = useState<Peer[]>(MOCK_PEERS);
   const [transfers, setTransfers] = useState<FileTransfer[]>([]);
-  const [isDiscovering, setIsDiscovering] = useState(true);
+  const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
+  const [networkId, setNetworkId] = useState<string>('detecting...');
+  const [publicIp, setPublicIp] = useState<string>('0.0.0.0');
+  
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
+  const db = useFirestore();
+  const auth = useAuth();
+  const { user, loading: userLoading } = useUser();
+
+  // 1. Handle Anonymous Auth & Network Detection
+  useEffect(() => {
+    if (!auth) return;
+    
+    // Sign in if not already
+    if (!user && !userLoading) {
+      signInAnonymously(auth).catch(console.error);
+    }
+
+    // Detect "Network" (Simplified using public IP grouping)
+    fetch('https://api.ipify.org?format=json')
+      .then(res => res.json())
+      .then(data => {
+        setPublicIp(data.ip);
+        // Use IP as network ID (or hash it for privacy)
+        setNetworkId(data.ip.replace(/\./g, '-'));
+      })
+      .catch(() => {
+        setNetworkId('local-dev');
+        setPublicIp('127.0.0.1');
+      });
+  }, [auth, user, userLoading]);
+
+  // 2. Register Presence
+  useEffect(() => {
+    if (!db || !user || networkId === 'detecting...') return;
+
+    const deviceType = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'ios' :
+                     /Android/i.test(navigator.userAgent) ? 'android' :
+                     /Mac/i.test(navigator.userAgent) ? 'mac' :
+                     /Win/i.test(navigator.userAgent) ? 'windows' : 'linux';
+
+    const peerRef = doc(db, 'peers', user.uid);
+    
+    const updatePresence = () => {
+      setDoc(peerRef, {
+        id: user.uid,
+        name: `${deviceType.toUpperCase()} User`, // Default name
+        ip: publicIp,
+        networkId: networkId,
+        deviceType: deviceType,
+        lastSeen: serverTimestamp(),
+        status: 'online'
+      }, { merge: true });
+    };
+
+    updatePresence();
+    const interval = setInterval(updatePresence, 30000); // Heartbeat every 30s
+
+    return () => clearInterval(interval);
+  }, [db, user, networkId, publicIp]);
+
+  // 3. Discover Peers on same network
+  const peersQuery = useMemo(() => {
+    if (!db || networkId === 'detecting...') return null;
+    // Filter by networkId and only show others
+    return query(
+      collection(db, 'peers'), 
+      where('networkId', '==', networkId),
+      where('status', '==', 'online')
+    );
+  }, [db, networkId]);
+
+  const { data: allPeers } = useCollection(peersQuery);
+  const nearbyPeers = (allPeers || []).filter(p => p.id !== user?.uid) as Peer[];
 
   // Simulate progress updates for active transfers
   useEffect(() => {
     const timer = setInterval(() => {
       setTransfers(prev => prev.map(t => {
         if (t.status !== 'active') return t;
-        
         const nextProgress = Math.min(t.progress + (Math.random() * 5), 100);
         const nextStatus = nextProgress >= 100 ? 'completed' : 'active';
-        
         return {
           ...t,
           progress: Math.floor(nextProgress),
           status: nextStatus,
-          speed: nextStatus === 'completed' ? 0 : 15 * 1024 * 1024 + (Math.random() * 5 * 1024 * 1024), // Random 15-20 MB/s
-          eta: nextStatus === 'completed' ? 0 : Math.max(0, (100 - nextProgress) * 0.5) // Crude ETA
+          speed: nextStatus === 'completed' ? 0 : 15 * 1024 * 1024 + (Math.random() * 5 * 1024 * 1024),
+          eta: nextStatus === 'completed' ? 0 : Math.max(0, (100 - nextProgress) * 0.5)
         };
       }));
     }, 1000);
@@ -92,7 +167,6 @@ export default function Home() {
       description: `Sending ${files.length} file(s) to ${selectedPeer.name}`,
     });
     
-    // Clear selection
     e.target.value = '';
     setSelectedPeer(null);
   };
@@ -107,7 +181,7 @@ export default function Home() {
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
-      {/* Sidebar - Desktop Only */}
+      {/* Sidebar */}
       <aside className="hidden md:flex w-64 bg-white border-r border-border flex-col p-6 space-y-8 shrink-0">
         <div className="flex items-center gap-2 mb-2">
           <div className="bg-primary p-2 rounded-xl text-white">
@@ -138,18 +212,17 @@ export default function Home() {
         <div className="bg-muted/50 rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground mb-3">
             <Wifi className="h-3 w-3 text-secondary animate-pulse" />
-            Your Network
+            Network: {networkId}
           </div>
           <div className="space-y-1">
-            <p className="text-sm font-medium">Home WiFi</p>
-            <p className="text-[10px] text-muted-foreground font-mono">192.168.1.18</p>
+            <p className="text-sm font-medium">Grouped by Public IP</p>
+            <p className="text-[10px] text-muted-foreground font-mono">{publicIp}</p>
           </div>
         </div>
       </aside>
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 bg-background">
-        {/* Top Header */}
         <header className="h-16 md:h-20 bg-white md:bg-transparent border-b md:border-none flex items-center justify-between px-6 shrink-0">
           <div className="flex items-center gap-2 md:hidden">
             <Zap className="h-6 w-6 text-primary" />
@@ -166,24 +239,19 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-3">
-             <Button variant="outline" size="icon" className="md:hidden">
-              <Settings className="h-5 w-5" />
-             </Button>
              <div className="h-10 w-10 rounded-full bg-secondary text-white flex items-center justify-center font-bold">
-               JD
+               {user?.uid.substring(0, 2).toUpperCase() || '??'}
              </div>
           </div>
         </header>
 
-        {/* Dashboard Area */}
         <ScrollArea className="flex-1 p-6 md:p-8">
           <div className="max-w-6xl mx-auto space-y-10">
             
-            {/* Header / CTA Section */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight mb-2 font-headline">Fast Local Transfer</h1>
-                <p className="text-muted-foreground">Automatically discovering devices on your current WiFi network.</p>
+                <p className="text-muted-foreground">Devices on your current network (IP: {publicIp}) will appear here.</p>
               </div>
               <div className="flex items-center gap-3">
                 <input 
@@ -204,10 +272,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Content Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              
-              {/* Left Column: Peer Discovery */}
               <div className="lg:col-span-2 space-y-6">
                 <div className="flex items-center justify-between">
                   <h2 className="text-xl font-semibold flex items-center gap-2">
@@ -216,27 +281,30 @@ export default function Home() {
                   </h2>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                    Searching...
+                    Scanning network...
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {peers.map(peer => (
+                  {nearbyPeers.map(peer => (
                     <PeerCard 
                       key={peer.id} 
                       peer={peer} 
                       onSelect={handlePeerSelect} 
                     />
                   ))}
-                  <div className="border-2 border-dashed border-border/60 rounded-xl p-8 flex flex-col items-center justify-center text-center opacity-60 hover:opacity-100 transition-opacity cursor-pointer bg-white/50">
-                    <Search className="h-8 w-8 mb-2 text-muted-foreground" />
-                    <p className="text-sm font-medium">Scanning for more...</p>
-                    <p className="text-xs text-muted-foreground mt-1">Make sure other devices have RapidShare open</p>
-                  </div>
+                  {nearbyPeers.length === 0 && (
+                    <div className="col-span-full border-2 border-dashed border-border/60 rounded-xl p-12 flex flex-col items-center justify-center text-center opacity-60 bg-white/50">
+                      <Search className="h-10 w-10 mb-4 text-muted-foreground" />
+                      <p className="text-lg font-medium">No other devices found</p>
+                      <p className="text-sm text-muted-foreground mt-2 max-w-xs">
+                        Open this page on another device with the same public IP to see them here.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* Right Column: Active Transfers */}
               <div className="space-y-6">
                 <h2 className="text-xl font-semibold flex items-center gap-2">
                   <History className="h-5 w-5 text-primary" />
@@ -259,7 +327,6 @@ export default function Home() {
                   )}
                 </div>
               </div>
-
             </div>
           </div>
         </ScrollArea>
