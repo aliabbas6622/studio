@@ -1,3 +1,4 @@
+
 "use client"
 
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -20,8 +21,6 @@ import {
 import { useToast } from '@/hooks/use-toast';
 import { 
   useFirestore, 
-  useAuth, 
-  useUser, 
   useCollection 
 } from '@/firebase';
 import { 
@@ -30,61 +29,58 @@ import {
   serverTimestamp, 
   collection, 
   query, 
-  where,
-  onSnapshot
+  where
 } from 'firebase/firestore';
-import { signInAnonymously } from 'firebase/auth';
 
 export default function Home() {
   const [transfers, setTransfers] = useState<FileTransfer[]>([]);
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [networkId, setNetworkId] = useState<string>('detecting...');
   const [publicIp, setPublicIp] = useState<string>('0.0.0.0');
+  const [deviceId, setDeviceId] = useState<string | null>(null);
   
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const db = useFirestore();
-  const auth = useAuth();
-  const { user, loading: userLoading } = useUser();
 
-  // 1. Handle Anonymous Auth & Network Detection
+  // 1. Initialize Device ID & Network Detection
   useEffect(() => {
-    if (!auth) return;
-    
-    // Sign in if not already
-    if (!user && !userLoading) {
-      signInAnonymously(auth).catch(console.error);
+    // Persistent Device ID
+    let id = localStorage.getItem('rapidshare_device_id');
+    if (!id) {
+      id = 'dev-' + Math.random().toString(36).substring(2, 15);
+      localStorage.setItem('rapidshare_device_id', id);
     }
+    setDeviceId(id);
 
     // Detect "Network" (Simplified using public IP grouping)
     fetch('https://api.ipify.org?format=json')
       .then(res => res.json())
       .then(data => {
         setPublicIp(data.ip);
-        // Use IP as network ID (or hash it for privacy)
         setNetworkId(data.ip.replace(/\./g, '-'));
       })
       .catch(() => {
         setNetworkId('local-dev');
         setPublicIp('127.0.0.1');
       });
-  }, [auth, user, userLoading]);
+  }, []);
 
   // 2. Register Presence
   useEffect(() => {
-    if (!db || !user || networkId === 'detecting...') return;
+    if (!db || !deviceId || networkId === 'detecting...') return;
 
     const deviceType = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'ios' :
                      /Android/i.test(navigator.userAgent) ? 'android' :
                      /Mac/i.test(navigator.userAgent) ? 'mac' :
                      /Win/i.test(navigator.userAgent) ? 'windows' : 'linux';
 
-    const peerRef = doc(db, 'peers', user.uid);
+    const peerRef = doc(db, 'peers', deviceId);
     
     const updatePresence = () => {
       setDoc(peerRef, {
-        id: user.uid,
-        name: `${deviceType.toUpperCase()} User`, // Default name
+        id: deviceId,
+        name: `${deviceType.toUpperCase()} User`,
         ip: publicIp,
         networkId: networkId,
         deviceType: deviceType,
@@ -94,15 +90,14 @@ export default function Home() {
     };
 
     updatePresence();
-    const interval = setInterval(updatePresence, 30000); // Heartbeat every 30s
+    const interval = setInterval(updatePresence, 30000);
 
     return () => clearInterval(interval);
-  }, [db, user, networkId, publicIp]);
+  }, [db, deviceId, networkId, publicIp]);
 
   // 3. Discover Peers on same network
   const peersQuery = useMemo(() => {
     if (!db || networkId === 'detecting...') return null;
-    // Filter by networkId and only show others
     return query(
       collection(db, 'peers'), 
       where('networkId', '==', networkId),
@@ -111,7 +106,7 @@ export default function Home() {
   }, [db, networkId]);
 
   const { data: allPeers } = useCollection(peersQuery);
-  const nearbyPeers = (allPeers || []).filter(p => p.id !== user?.uid) as Peer[];
+  const nearbyPeers = (allPeers || []).filter(p => p.id !== deviceId) as Peer[];
 
   // Simulate progress updates for active transfers
   useEffect(() => {
@@ -240,7 +235,7 @@ export default function Home() {
 
           <div className="flex items-center gap-3">
              <div className="h-10 w-10 rounded-full bg-secondary text-white flex items-center justify-center font-bold">
-               {user?.uid.substring(0, 2).toUpperCase() || '??'}
+               {deviceId?.substring(deviceId.length - 2).toUpperCase() || '??'}
              </div>
           </div>
         </header>
